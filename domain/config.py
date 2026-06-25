@@ -134,10 +134,10 @@ class TypstPluginConfig:
             title=str(raw_qz.get("title", "Bot使用说明")).strip(),
             content=str(raw_qz.get("content", "点击查看详细功能贴")).strip(),
             image=str(raw_qz.get("image", "")).strip(),
-            mode=str(raw_qz.get("mode", "json")).strip().lower() or "text",
+            mode=str(raw_qz.get("mode", "json")).strip().lower() or "json",
         )
         # 安全兜底
-        if qzone_cfg.mode not in ("text", "share", "json"):
+        if qzone_cfg.mode not in ("text", "share", "json", "ark", "auto"):
             qzone_cfg.mode = "json"
 
         logger.debug(f"[HelpTypst] 配置加载完毕: PPI={render_cfg.ppi}, Concurrency={render_cfg.max_concurrent_tasks}, 外观预设: {active_preset_name}, QZone: {qzone_cfg.enable}/{qzone_cfg.mode}/{bool(qzone_cfg.url)}")

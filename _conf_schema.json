@@ -15,7 +15,7 @@
       "session_controller",
       "builtin_commands",
       "astrbot-reminder",
-      "astrbot_plugin_help_typst"
+      "astrbot_plugin_help_typs87"
     ],
     "hint": "屏蔽不想展示、导致问题的插件菜单 (使用 name 字段)"
   },
@@ -58,6 +58,13 @@
         "type": "string",
         "default": "",
         "hint": "可选，https 图片链接，留空由QQ自动抓取"
+      },
+      "mode": {
+        "description": "发送模式",
+        "type": "string",
+        "default": "json",
+        "options": ["json", "text", "ark", "auto"],
+        "hint": "json=Ark卡片(推荐) | text=纯文本URL降级 | ark=尝试签名卡片 | auto=自动选择最佳"
       }
     }
   },
