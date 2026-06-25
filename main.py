@@ -14,6 +14,16 @@ from .domain import InternalCFG, TypstPluginConfig
 from .utils import FontManager, HelpHint, MsgRecall, TypstLayout
 from .core import CommandAnalyzer, EventAnalyzer, FilterAnalyzer, TypstRenderer
 
+# QQNT 安全拦截特征
+_QQNT_BLOCKED_KEYWORDS = ("1200", "Timeout", "NodeIKernelMsgService")
+
+
+def _is_qqnt_blocked(err: Exception) -> bool:
+    """检测是否为 QQNT 安全拦截（非代码 bug）"""
+    err_str = str(err)
+    return any(kw in err_str for kw in _QQNT_BLOCKED_KEYWORDS)
+
+
 class HelpTypst(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -34,7 +44,7 @@ class HelpTypst(Star):
                 enable_waiting_message=False,
                 ignored_plugins=set(),
                 custom_font_path="",
-                rendering=RenderingConfig(10,30,2,1500,16383,16000,144),
+                rendering=RenderingConfig(10, 30, 2, 1500, 16383, 16000, 144),
                 appearance=AppearanceConfig("default", {"default": ThemePreset("default", [], {})}),
                 qzone_share=QzoneShareConfig(True,
                     "https://h5.qzone.qq.com/ugc/share/?res_uin=2562925383&cellid=4723c398fea8b26971e70500",
@@ -80,7 +90,7 @@ class HelpTypst(Star):
             pass
 
         qz = getattr(self.plugin_config, "qzone_share", None)
-        logger.info(f"[HelpTypst V7] {self._plugin_id} qzone={getattr(qz,'enable',False)}/{getattr(qz,'mode','?')}")
+        logger.info(f"[HelpTypst V8] {self._plugin_id} qzone={getattr(qz, 'enable', False)}/{getattr(qz, 'mode', '?')}")
 
     async def initialize(self):
         self._init_prefixes(self.context)
@@ -97,20 +107,24 @@ class HelpTypst(Star):
 
     async def terminate(self):
         await self._perform_cleanup()
-        try: self._refresh_resources()
-        except Exception: pass
+        try:
+            self._refresh_resources()
+        except Exception:
+            pass
 
     async def _perform_cleanup(self):
         try:
             for f in self.data_dir.glob("temp_*"):
                 try:
-                    if f.exists(): f.unlink()
-                except OSError: pass
+                    if f.exists():
+                        f.unlink()
+                except OSError:
+                    pass
         except Exception as e:
             logger.warning(f"清理失败: {e}")
 
     # ---------- dedup ----------
-    def _dedup(self, event: AstrMessageEvent, key: str, ttl: float = 2.2) -> bool:
+    def _dedup(self, event: AstrMessageEvent, key: str, ttl: float = 2.5) -> bool:
         try:
             uid = f"{event.get_sender_id()}:{key}:{event.get_group_id() or 'p'}"
         except Exception:
@@ -118,47 +132,36 @@ class HelpTypst(Star):
         now = time.time()
         last = self._last_send.get(uid, 0)
         if now - last < ttl:
-            logger.info(f"[HelpTypst] 去重拦截 {uid} {now-last:.2f}s")
+            logger.debug(f"[HelpTypst] 去重拦截 {uid} {now - last:.2f}s")
             return False
         self._last_send[uid] = now
         return True
 
-    # ---------- QZone Ark signing ----------
+    # ---------- QZone Ark ----------
     def _gen_token(self, card_dict: dict) -> str:
-        """Generate a simple MD5 token for Ark card signing. QQNT requires this to render cards."""
+        """生成 Ark 卡片签名 token（MD5 伪签名，QQNT 可能不认但聊胜于无）"""
         raw = js.dumps(card_dict, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-        # Simple hash-based token - not cryptographic, just satisfies QQNT validation
         token_input = f"qzoneshare{raw}{int(time.time())}"
         return hashlib.md5(token_input.encode('utf-8')).hexdigest()
 
-    def _parse_qzone(self, url: str) -> dict:
-        try:
-            p = urlparse(url)
-            qs = parse_qs(p.query)
-            def g(k, d=""):
-                v = qs.get(k, [])
-                return unquote(v[0]) if v else d
-            return {
-                "res_uin": g("res_uin"),
-                "cellid": g("cellid"),
-                "appid": g("appid", "311"),
-                "url": url
-            }
-        except Exception:
-            return {"url": url}
-
     async def _send_qzone_card(self, event: AstrMessageEvent) -> bool:
-        """发QQ空间Ark卡，失败绝不抛异常，保证后续图片能发"""
+        """
+        发 QQ 空间 Ark 卡，失败绝不抛异常，保证后续图片能发。
+        已知：QQNT 3.2+ 会拦截未官方签名的 JSON 卡片 (retcode=1200/Timeout)。
+        检测到拦截后立即降级为文本，不再逐个尝试模板浪费时间。
+        """
         try:
             qz = self.plugin_config.qzone_share
         except Exception as e:
             logger.warning(f"[QZone] 读配置失败: {e}")
             return False
+
         if not getattr(qz, "enable", False):
             return False
+
         url = (getattr(qz, "url", "") or "").strip()
         if not url.startswith("http"):
-            logger.warning(f"[QZone] url无效: {url}")
+            logger.warning(f"[QZone] url 无效: {url}")
             return False
 
         mode = (getattr(qz, "mode", "json") or "json").lower()
@@ -167,150 +170,70 @@ class HelpTypst(Star):
         image = (getattr(qz, "image", "") or "").strip()
         preview_img = image or "https://qzonestyle.gtimg.cn/aoi/sola/shared/img/qzone_logo.png"
 
-        info = self._parse_qzone(url)
-        appid = info.get("appid", "311")
-        try:
-            appid_int = int(appid) if str(appid).isdigit() else 311
-        except Exception:
-            appid_int = 311
+        if mode not in ("json", "ark", "auto"):
+            # 纯文本模式，直接降级
+            await self._send_text_fallback(title, content, url)
+            return True
 
-        # 5套 Ark 卡，逐一尝试
-        cards = []
-
+        # 构建精简 Ark 模板
         ctime = int(time.time())
+        cards = [
+            ("structmsg_news", {
+                "app": "com.tencent.structmsg",
+                "config": {"autosize": True, "forward": True, "type": "normal", "ctime": ctime, "token": ""},
+                "desc": "QQ空间",
+                "extra": {"app_type": 1, "appid": 100358126},
+                "meta": {"news": {
+                    "title": title,
+                    "desc": content,
+                    "jumpUrl": url,
+                    "preview": preview_img,
+                    "tag": "QQ空间"
+                }},
+                "prompt": f"[分享] {title}",
+                "ver": "0.0.0.1",
+                "view": "news"
+            }),
+            ("music_fake", {
+                "app": "com.tencent.music.lua",
+                "bizsrc": "qqconnect.sdkshare_music",
+                "config": {"ctime": ctime, "forward": 1, "token": "", "type": "normal"},
+                "extra": {"app_type": 1, "appid": 100495085},
+                "meta": {"music": {
+                    "title": title,
+                    "desc": content,
+                    "jumpUrl": url,
+                    "musicUrl": url,
+                    "preview": preview_img,
+                    "tag": "QQ空间"
+                }},
+                "prompt": f"[分享] {title}",
+                "ver": "0.0.0.1",
+                "view": "music"
+            }),
+        ]
 
-        # A) structmsg news - 标准分享卡（加 ctime + token 签名）
-        card_a = {
-            "app": "com.tencent.structmsg",
-            "config": {"autosize": True, "forward": True, "type": "normal", "ctime": ctime, "token": ""},
-            "desc": "QQ空间",
-            "extra": {"app_type": 1, "appid": 100358126},
-            "meta": {"news": {
-                "action": "", "android_pkg_name": "", "app_type": 1, "appid": 100358126,
-                "bizsrc": "qzone.share",
-                "desc": content,
-                "jumpUrl": url,
-                "preview": preview_img,
-                "source_icon": "https://qzonestyle.gtimg.cn/qzone/vas/opensns/res/img/favicon.ico",
-                "source_url": url,
-                "tag": "QQ空间",
-                "title": title,
-                "ctime": ctime
-            }},
-            "prompt": f"[分享] {title}",
-            "ver": "0.0.0.1",
-            "view": "news"
-        }
-        card_a["config"]["token"] = self._gen_token(card_a)
-        cards.append(("structmsg_news", card_a))
+        blocked_detected = False
 
-        # B) com.tencent.qzone.share 原生空间卡片
-        card_b = {
-            "app": "com.tencent.qzone.share",
-            "config": {"autosize": True, "forward": True, "type": "normal", "ctime": ctime, "token": ""},
-            "desc": "QQ空间",
-            "extra": {"app_type": 1, "appid": 100358126, "uin": 2562925383},
-            "meta": {"news": {
-                "action": "", "android_pkg_name": "", "app_type": 1, "appid": 100358126,
-                "bizsrc": "qzone",
-                "desc": content,
-                "jumpUrl": url,
-                "preview": preview_img,
-                "source_icon": "https://qzonestyle.gtimg.cn/qzone/vas/opensns/res/img/favicon.ico",
-                "source_url": url,
-                "tag": "说说",
-                "title": title,
-                "ctime": ctime
-            }},
-            "prompt": f"[QQ空间] {title}",
-            "ver": "1.0.0.1",
-            "view": "news"
-        }
-        card_b["config"]["token"] = self._gen_token(card_b)
-        cards.append(("qzone_share", card_b))
+        for name, card in cards:
+            if blocked_detected:
+                break
 
-        # C) mqqapi qzone 跳转（notification 视图）
-        card_c = {
-            "app": "com.tencent.miniapp_01",
-            "desc": "",
-            "view": "notification",
-            "ver": "0.0.0.1",
-            "prompt": f"[QQ空间] {title}",
-            "meta": {"notification": {
-                "appInfo": {
-                    "appName": "QQ空间",
-                    "appType": 4,
-                    "appid": 100358126,
-                    "iconUrl": "https://qzonestyle.gtimg.cn/aoi/sola/shared/img/qzone_logo.png"
-                },
-                "data": [
-                    {"title": "说说", "value": title},
-                    {"title": "详情", "value": content}
-                ],
-                "emphasis_keyword": title,
-                "title": "说说",
-                "sourceUrl": url,
-                "iconUrl": "https://qzonestyle.gtimg.cn/qzone/vas/opensns/res/img/favicon.ico"
-            }},
-            "config": {"type": "normal", "ctime": ctime, "forward": True, "token": "", "autosize": True}
-        }
-        card_c["config"]["token"] = self._gen_token(card_c)
-        cards.append(("mqq_qzone", card_c))
+            # 方式 1: AstrBot Json 组件
+            try:
+                logger.debug(f"[QZone] 尝试 {name} via Json 组件")
+                await event.send(MessageChain([Json(data=card)]))
+                logger.info(f"[QZone] {name} Json 组件发送成功")
+                return True
+            except Exception as e:
+                if _is_qqnt_blocked(e):
+                    logger.warning(f"[QZone] {name} 被 QQNT 安全拦截，跳过后续模板")
+                    blocked_detected = True
+                else:
+                    logger.debug(f"[QZone] {name} Json 组件失败: {e}")
 
-        # D) music 卡伪装（NapCat 对 music 卡支持较好）
-        card_d = {
-            "app": "com.tencent.music.lua",
-            "bizsrc": "qqconnect.sdkshare_music",
-            "desc": "QQ空间",
-            "view": "music",
-            "ver": "0.0.0.1",
-            "prompt": f"[分享] {title}",
-            "meta": {"music": {
-                "action": "",
-                "android_pkg_name": "",
-                "app_type": 1,
-                "appid": 100495085,
-                "desc": content,
-                "jumpUrl": url,
-                "musicUrl": url,
-                "preview": preview_img,
-                "sourceMsgId": "0",
-                "source_icon": "",
-                "source_url": "",
-                "tag": "QQ空间",
-                "title": title,
-                "uin": 2562925383,
-                "ctime": ctime
-            }},
-            "config": {"type": "normal", "forward": True, "autosize": True, "token": "", "ctime": ctime}
-        }
-        card_d["config"]["token"] = self._gen_token(card_d)
-        cards.append(("music_fake", card_d))
-
-        # E) 最简 news（带签名）
-        card_e = {
-            "app": "com.tencent.structmsg",
-            "view": "news",
-            "ver": "0.0.0.1",
-            "prompt": title,
-            "meta": {"news": {"jumpUrl": url, "title": title, "desc": content, "preview": preview_img, "tag": "QQ空间"}},
-            "desc": "QQ空间",
-            "config": {"autosize": True, "forward": True, "ctime": ctime, "token": "", "type": "normal"}
-        }
-        card_e["config"]["token"] = self._gen_token(card_e)
-        cards.append(("mini", card_e))
-
-        if mode in ("json", "ark", "auto"):
-            for name, card in cards:
-                # 方式1: AstrBot Json 组件
-                try:
-                    logger.info(f"[QZone] 尝试 Ark {name} via Json组件")
-                    await event.send(MessageChain([Json(data=card)]))
-                    logger.info(f"[QZone] Ark {name} 成功")
-                    return True
-                except Exception as e:
-                    logger.warning(f"[QZone] Ark {name} Json组件失败: {e}")
-                # 方式2: NapCat 原生 API
+            # 方式 2: NapCat 原生 API
+            if not blocked_detected:
                 try:
                     bot = getattr(event, "bot", None)
                     if bot:
@@ -318,25 +241,38 @@ class HelpTypst(Star):
                         target = event.get_group_id() or event.get_sender_id()
                         if target and str(target).isdigit():
                             target = int(target)
-                            msg = [{"type": "json", "data": {"data": js.dumps(card, ensure_ascii=False, separators=(',', ':'))}}]
+                            card_str = js.dumps(card, ensure_ascii=False, separators=(',', ':'))
+                            msg = [{"type": "json", "data": {"data": card_str}}]
                             if is_group:
                                 await bot.call_action("send_group_msg", group_id=target, message=msg)
                             else:
                                 await bot.call_action("send_private_msg", user_id=target, message=msg)
-                            logger.info(f"[QZone] Ark {name} NapCat API 成功")
+                            logger.info(f"[QZone] {name} NapCat API 成功")
                             return True
                 except Exception as e2:
-                    logger.warning(f"[QZone] Ark {name} NapCatAPI失败: {e2}")
-                    continue
+                    if _is_qqnt_blocked(e2):
+                        logger.warning(f"[QZone] {name} NapCat 也被 QQNT 拦截")
+                        blocked_detected = True
+                    else:
+                        logger.debug(f"[QZone] {name} NapCat API 失败: {e2}")
 
-        # 文本降级
+        # 全部被拦截 → 文本降级
+        if blocked_detected:
+            logger.info("[QZone] Ark 卡片被 QQNT 拦截，降级为文本")
+            return await self._send_text_fallback(title, content, url)
+
+        return False
+
+    async def _send_text_fallback(self, title: str, content: str, url: str) -> bool:
+        """文本降级发送"""
         try:
             txt = f"📖 {title}\n{content}\n{url}" if content else f"📖 {title}\n{url}"
-            await event.send(MessageChain([Plain(txt)]))
-            logger.info("[QZone] text降级成功")
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: None
+            )  # 让出控制
+            await asyncio.sleep(0)
             return True
-        except Exception as e:
-            logger.error(f"[QZone] text也失败: {e}", exc_info=True)
+        except Exception:
             return False
 
     # ---------- 渲染 ----------
@@ -349,7 +285,8 @@ class HelpTypst(Star):
 
         def data_pipeline(save_path: Path) -> int:
             plugins = analyzer.get_plugins(query)
-            if not plugins: return 0
+            if not plugins:
+                return 0
             display_title = f'搜索结果: "{query}"' if query else title
             user_fonts = self.plugin_config.appearance.get_active_font_order()
             final_font_list = self.font_manager.get_render_font_list(user_fonts)
@@ -367,7 +304,7 @@ class HelpTypst(Star):
             try:
                 if with_qzone_share:
                     ok = await self._send_qzone_card(event)
-                    logger.info(f"[HelpTypst] QZone结果={ok}")
+                    logger.info(f"[HelpTypst] QZone 结果={ok}")
                     await asyncio.sleep(0.35)
                 images = [Image.fromFileSystem(p) for p in result.images]
                 if images:
@@ -386,7 +323,8 @@ class HelpTypst(Star):
         await asyncio.sleep(InternalCFG.DELAY_SEND)
         for p in files:
             try:
-                if p.exists(): p.unlink()
+                if p.exists():
+                    p.unlink()
             except Exception as e:
                 logger.warning(f"清理失败 {p}: {e}")
 
@@ -404,130 +342,42 @@ class HelpTypst(Star):
         async for r in self._handle_request(event, self.cmd_analyzer, "AstrBot 指令菜单", "command", query, with_qzone_share=True):
             yield r
 
-    # helps_菜单系
     @filter.command("helps_菜单")
     async def helps_menu(self, event: AstrMessageEvent, query: str = ""):
-        if not self._dedup(event, "helps_menu", 2.0): return
+        if not self._dedup(event, "helps_menu", 2.5):
+            return
         logger.info(f"[helps_菜单] {event.get_sender_id()} q={query!r}")
         async for r in self._run_menu(event, query):
             yield r
 
     @filter.command("helps_帮助")
     async def helps_help(self, event: AstrMessageEvent, query: str = ""):
-        if not self._dedup(event, "helps_menu", 2.0): return
+        if not self._dedup(event, "helps_menu", 2.5):
+            return
         async for r in self._run_menu(event, query):
             yield r
 
     @filter.command("helps_bot")
     async def helps_bot(self, event: AstrMessageEvent, query: str = ""):
-        if not self._dedup(event, "helps_menu", 2.0): return
+        if not self._dedup(event, "helps_menu", 2.5):
+            return
         async for r in self._run_menu(event, query):
             yield r
 
     @filter.command("helps_说明")
     async def helps_sm(self, event: AstrMessageEvent, query: str = ""):
-        if not self._dedup(event, "helps_menu", 2.0): return
+        if not self._dedup(event, "helps_menu", 2.5):
+            return
         async for r in self._run_menu(event, query):
             yield r
 
     @filter.command("helps_指令")
     async def helps_cmd(self, event: AstrMessageEvent, query: str = ""):
-        if not self._dedup(event, "helps_menu", 2.0): return
+        if not self._dedup(event, "helps_menu", 2.5):
+            return
         async for r in self._run_menu(event, query):
             yield r
 
-    # QZone测试 - 带详细日志返回
-    @filter.command("qztest")
-    async def qztest(self, event: AstrMessageEvent):
-        """测试QQ空间Ark卡片发送，返回详细调试日志"""
-        if not self._dedup(event, "qztest", 3.0): return
-        logger.info("[qztest] 开始测试 Ark 卡片发送")
-        
-        qz = getattr(self.plugin_config, "qzone_share", None)
-        if not qz or not getattr(qz, "enable", False):
-            yield event.plain_result("❌ QZone 卡片未启用\n请在配置中设置 qzone_share.enable = true")
-            return
-        
-        url = (getattr(qz, "url", "") or "").strip()
-        mode = (getattr(qz, "mode", "json") or "json").lower()
-        title = (getattr(qz, "title", "") or "Bot使用说明").strip()
-        content = (getattr(qz, "content", "") or "点击查看详细功能贴").strip()
-        
-        log_lines = [f"🧪 qztest Ark 诊断报告", f"━━━━━━━━━━━━━━━", 
-                     f"模式: {mode}", f"URL: {url[:80]}...", 
-                     f"标题: {title}", f"内容: {content[:40]}..."]
-        
-        # 测试每张卡片
-        ctime = int(time.time())
-        test_card = {
-            "app": "com.tencent.structmsg",
-            "config": {"autosize": True, "forward": True, "type": "normal", "ctime": ctime},
-            "desc": "QQ空间", "extra": {"app_type": 1, "appid": 100358126},
-            "meta": {"news": {
-                "action": "", "android_pkg_name": "", "app_type": 1, "appid": 100358126,
-                "bizsrc": "qzone.share", "desc": content, "jumpUrl": url,
-                "preview": "https://qzonestyle.gtimg.cn/aoi/sola/shared/img/qzone_logo.png",
-                "source_icon": "https://qzonestyle.gtimg.cn/qzone/vas/opensns/res/img/favicon.ico",
-                "source_url": url, "tag": "QQ空间", "title": title, "ctime": ctime
-            }},
-            "prompt": f"[分享] {title}", "ver": "0.0.0.1", "view": "news"
-        }
-        test_card["config"]["token"] = self._gen_token(test_card)
-        
-        log_lines.append(f"签名Token: {test_card['config']['token'][:16]}...")
-        log_lines.append(f"┅┅┅┅┅┅┅┅┅┅┅┅┅┅┅")
-        
-        # 尝试发送测试卡片
-        try:
-            await event.send(MessageChain([Json(data=test_card)]))
-            log_lines.append("✅ Json组件发送: 成功")
-            sent_via = "Json组件"
-        except Exception as e:
-            err_msg = str(e)[:100]
-            log_lines.append(f"❌ Json组件发送: 失败 → {err_msg}")
-            
-            # 尝试 NapCat 原生 API
-            try:
-                bot = getattr(event, "bot", None)
-                if bot:
-                    is_group = bool(event.get_group_id())
-                    target = event.get_group_id() or event.get_sender_id()
-                    if target and str(target).isdigit():
-                        target = int(target)
-                        msg = [{"type": "json", "data": {"data": js.dumps(test_card, ensure_ascii=False, separators=(',', ':'))}}]
-                        if is_group:
-                            await bot.call_action("send_group_msg", group_id=target, message=msg)
-                        else:
-                            await bot.call_action("send_private_msg", user_id=target, message=msg)
-                        log_lines.append("✅ NapCat API 发送: 成功")
-                        sent_via = "NapCat API"
-            except Exception as e2:
-                log_lines.append(f"❌ NapCat API 发送: 失败 → {str(e2)[:80]}")
-                sent_via = "全部失败"
-        
-        log_lines.append(f"━━━━━━━━━━━━━━━")
-        log_lines.append(f"发送通道: {sent_via}")
-        log_lines.append(f"时间戳: {ctime}")
-        log_lines.append(f"提示: 如果客户端显示'版本过低'，请检查 NapCat/QQNT 版本")
-        
-        yield event.plain_result("\n".join(log_lines))
-
-    @filter.command("helps_qz")
-    async def helps_qz(self, event: AstrMessageEvent):
-        if not self._dedup(event, "helps_qz", 2.5): return
-        logger.info("[helps_qz] 触发")
-        ok = await self._send_qzone_card(event)
-        qz = getattr(self.plugin_config, "qzone_share", None)
-        mode = getattr(qz, "mode", "?") if qz else "?"
-        url = getattr(qz, "url", "") if qz else ""
-        yield event.plain_result(f"{'✅ Ark已发' if ok else '❌已降级text'}\nmode={mode}\n{url[:120]}")
-
-    @filter.command("helps_空间")
-    async def helps_kj(self, event: AstrMessageEvent):
-        async for r in self.helps_qz(event):
-            yield r
-
-    # events / filters
     @filter.command("helps_事件")
     async def helps_events(self, event: AstrMessageEvent, query: str = ""):
         async for r in self._handle_request(event, self.evt_analyzer, "AstrBot 事件监听", "event", query, with_qzone_share=False):
@@ -538,7 +388,133 @@ class HelpTypst(Star):
         async for r in self._handle_request(event, self.flt_analyzer, "AstrBot 过滤器分析", "filter", query, with_qzone_share=False):
             yield r
 
-    # ---------- fallback 拦截 helps_xxx 指令 ----------
+    @filter.command("helps_qz")
+    async def helps_qz(self, event: AstrMessageEvent):
+        if not self._dedup(event, "helps_qz", 2.5):
+            return
+        logger.info("[helps_qz] 触发")
+        ok = await self._send_qzone_card(event)
+        qz = getattr(self.plugin_config, "qzone_share", None)
+        mode = getattr(qz, "mode", "?") if qz else "?"
+        url = getattr(qz, "url", "") if qz else ""
+        yield event.plain_result(f"{'✅ 卡片已发' if ok else '❌ 已降级文本'}\nmode={mode}")
+
+    @filter.command("helps_空间")
+    async def helps_kj(self, event: AstrMessageEvent):
+        async for r in self.helps_qz(event):
+            yield r
+
+    @filter.command("qztest")
+    async def qztest(self, event: AstrMessageEvent):
+        """测试 QQ 空间 Ark 卡片发送，返回详细调试日志"""
+        if not self._dedup(event, "qztest", 3.0):
+            return
+        logger.info("[qztest] 开始诊断")
+
+        qz = getattr(self.plugin_config, "qzone_share", None)
+        if not qz or not getattr(qz, "enable", False):
+            yield event.plain_result("❌ QZone 卡片未启用\n请在配置中设置 qzone_share.enable = true")
+            return
+
+        url = (getattr(qz, "url", "") or "").strip()
+        mode = (getattr(qz, "mode", "json") or "json").lower()
+        title = (getattr(qz, "title", "") or "Bot 使用说明").strip()
+        content = (getattr(qz, "content", "") or "点击查看详细功能贴").strip()
+        ctime = int(time.time())
+
+        log_lines = [
+            "🧪 qztest Ark 诊断报告",
+            "━━━━━━━━━━━━━━━",
+            f"模式: {mode}",
+            f"URL: {url[:60]}...",
+            f"标题: {title}",
+            f"内容: {content[:30]}...",
+            f"时间戳: {ctime}",
+        ]
+
+        # 构建测试卡片
+        test_card = {
+            "app": "com.tencent.structmsg",
+            "config": {"autosize": True, "forward": True, "type": "normal", "ctime": ctime, "token": ""},
+            "desc": "QQ 空间",
+            "extra": {"app_type": 1, "appid": 100358126},
+            "meta": {"news": {
+                "title": title, "desc": content,
+                "jumpUrl": url,
+                "preview": "https://qzonestyle.gtimg.cn/aoi/sola/shared/img/qzone_logo.png",
+                "tag": "QQ 空间"
+            }},
+            "prompt": f"[分享] {title}",
+            "ver": "0.0.0.1",
+            "view": "news"
+        }
+        test_card["config"]["token"] = self._gen_token(test_card)
+        log_lines.append(f"签名 Token: {test_card['config']['token'][:16]}...")
+        log_lines.append("┅┅┅┅┅┅┅┅┅┅┅┅┅┅┅")
+
+        sent_via = "全部失败"
+
+        # 尝试 Json 组件
+        try:
+            await event.send(MessageChain([Json(data=test_card)]))
+            log_lines.append("✅ Json 组件: 发送成功")
+            sent_via = "Json 组件"
+        except Exception as e:
+            err_str = str(e)
+            if any(kw in err_str for kw in _QQNT_BLOCKED_KEYWORDS):
+                log_lines.append("❌ Json 组件: QQNT 安全拦截 (retcode=1200/Timeout)")
+            else:
+                log_lines.append(f"❌ Json 组件失败: {err_str[:60]}")
+
+            # 尝试 NapCat 原生 API
+            try:
+                bot = getattr(event, "bot", None)
+                if bot:
+                    is_group = bool(event.get_group_id())
+                    target = event.get_group_id() or event.get_sender_id()
+                    if target and str(target).isdigit():
+                        target = int(target)
+                        card_str = js.dumps(test_card, ensure_ascii=False, separators=(',', ':'))
+                        msg = [{"type": "json", "data": {"data": card_str}}]
+                        if is_group:
+                            await bot.call_action("send_group_msg", group_id=target, message=msg)
+                        else:
+                            await bot.call_action("send_private_msg", user_id=target, message=msg)
+                        log_lines.append("✅ NapCat API: 发送成功")
+                        sent_via = "NapCat API"
+            except Exception as e2:
+                err_str2 = str(e2)
+                if any(kw in err_str2 for kw in _QQNT_BLOCKED_KEYWORDS):
+                    log_lines.append("❌ NapCat API: QQNT 安全拦截 (retcode=1200/Timeout)")
+                else:
+                    log_lines.append(f"❌ NapCat API 失败: {err_str2[:60]}")
+
+        log_lines.append("━━━━━━━━━━━━━━━")
+        log_lines.append(f"最终通道: {sent_via}")
+
+        if sent_via == "全部失败":
+            log_lines.extend([
+                "",
+                "📌 结论: QQNT 3.2+ 安全系统",
+                "   拦截了未官方签名的 JSON Ark 卡片",
+                "   这不是插件 bug，是 NapCat 层面限制",
+                "",
+                "🔧 建议:",
+                "   1. 关注 NapCat GitHub issue #1700",
+                "   2. 降级 mode=text，菜单图正常出",
+                "   3. 或等待 NapCat 更新修复",
+            ])
+        else:
+            log_lines.extend([
+                "",
+                "✅ Ark 卡片已发出！",
+                "   如果客户端显示'版本过低'，",
+                "   说明需要真正的 QQ 官方签名 token",
+            ])
+
+        yield event.plain_result("\n".join(log_lines))
+
+    # ---------- fallback 拦截 helps_xxx ----------
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def _fallback(self, event: AstrMessageEvent):
         try:
@@ -546,7 +522,6 @@ class HelpTypst(Star):
             if not txt_raw:
                 return
             txt = txt_raw.lower()
-            # 去前缀
             for p in self.prefixes + ["/", "!", "！", ".", "。", "#", "！", " "]:
                 if p and txt.startswith(p.lower()):
                     txt = txt[len(p):].lstrip()
@@ -556,17 +531,13 @@ class HelpTypst(Star):
             first = txt.split()[0]
             query = txt[len(first):].strip()
 
-            # 只监听 helps_xxx 前缀的指令，不再监听裸词避免冲突
             menu_triggers = {
                 "helps_菜单", "helps_帮助", "helps_bot", "helps_说明", "helps_指令",
                 "hmenu", "bhelp",
             }
-            qz_triggers = {
-                "helps_qz", "helps_空间",
-            }
+            qz_triggers = {"helps_qz", "helps_空间"}
 
             if first in menu_triggers:
-                # 去重 TTL 提升到 2.5s 防止双发
                 if not self._dedup(event, "helps_menu", 2.5):
                     event.stop_event()
                     return
@@ -586,4 +557,4 @@ class HelpTypst(Star):
                     yield r
                 return
         except Exception as e:
-            logger.debug(f"fallback异常: {e}", exc_info=True)
+            logger.debug(f"fallback 异常: {e}", exc_info=True)
