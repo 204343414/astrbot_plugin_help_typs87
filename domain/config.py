@@ -64,7 +64,7 @@ class QzoneShareConfig:
     title: str
     content: str
     image: str
-    mode: str = "text"  # text | share | json
+    mode: str = "json"  # text | share | json
 
     def is_valid(self) -> bool:
         return bool(self.enable and self.url and self.url.strip().startswith("http"))
@@ -134,11 +134,11 @@ class TypstPluginConfig:
             title=str(raw_qz.get("title", "Bot使用说明")).strip(),
             content=str(raw_qz.get("content", "点击查看详细功能贴")).strip(),
             image=str(raw_qz.get("image", "")).strip(),
-            mode=str(raw_qz.get("mode", "text")).strip().lower() or "text",
+            mode=str(raw_qz.get("mode", "json")).strip().lower() or "text",
         )
         # 安全兜底
         if qzone_cfg.mode not in ("text", "share", "json"):
-            qzone_cfg.mode = "text"
+            qzone_cfg.mode = "json"
 
         logger.debug(f"[HelpTypst] 配置加载完毕: PPI={render_cfg.ppi}, Concurrency={render_cfg.max_concurrent_tasks}, 外观预设: {active_preset_name}, QZone: {qzone_cfg.enable}/{qzone_cfg.mode}/{bool(qzone_cfg.url)}")
 
