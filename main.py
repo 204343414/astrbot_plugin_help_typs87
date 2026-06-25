@@ -23,7 +23,21 @@ class HelpTypst(Star):
 
         # 2. 配置加载
         self.config = config
-        self.plugin_config = TypstPluginConfig.load(config)
+        # 兼容旧配置热重载
+        try:
+            self.plugin_config = TypstPluginConfig.load(config)
+        except Exception as e:
+            logger.error(f"[HelpTypst] 配置加载失败: {e}", exc_info=True)
+            # 构造一个最小兜底配置，避免整插件崩掉导致指令无法注册
+            from .domain.config import QzoneShareConfig, RenderingConfig, AppearanceConfig, ThemePreset
+            self.plugin_config = TypstPluginConfig(
+                enable_waiting_message=False,
+                ignored_plugins=set(),
+                custom_font_path="",
+                rendering=RenderingConfig(10,30,2,1500,16383,16000,144),
+                appearance=AppearanceConfig("default", {"default": ThemePreset("default", [], {})}),
+                qzone_share=QzoneShareConfig(True, "", "Bot使用说明", "", "")
+            )
 
         # 3. 获取字体
         raw_path = self.plugin_config.custom_font_path
@@ -63,11 +77,24 @@ class HelpTypst(Star):
 
         self.prefixes: list[str] = []
 
+        # 插件真实ID（用于自我重载）
+        self._plugin_id = "astrbot_plugin_help_typs87"
+        try:
+            import yaml
+            meta_path = self.plugin_dir / "metadata.yaml"
+            if meta_path.exists():
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = yaml.safe_load(f)
+                    self._plugin_id = meta.get("name", self._plugin_id)
+        except Exception:
+            pass
+        logger.info(f"[HelpTypst] plugin_id={self._plugin_id} qzone_enable={getattr(self.plugin_config.qzone_share, 'enable', False)} qzone_url={getattr(self.plugin_config.qzone_share, 'url', '')[:60]}")
+
     async def initialize(self):
         """异步初始化"""
         self._init_prefixes(self.context)
         await asyncio.to_thread(self._refresh_resources)
-        logger.info("[HelpTypst] 初始化完成")
+        logger.info(f"[HelpTypst] 初始化完成 prefixes={self.prefixes}")
 
     def _refresh_resources(self):
         try:
@@ -134,7 +161,7 @@ class HelpTypst(Star):
                 self.context, "_star_manager", None
             )  # hack: 获取 PluginManager 实例
             if pm:
-                plugin_name = getattr(self, "name", "astrbot_plugin_help_typst")
+                plugin_name = self._plugin_id
                 yield event.plain_result(
                     f"✅ 扫描完成 ({count} fonts)。正在重载以刷新面板..."
                 )
@@ -153,35 +180,65 @@ class HelpTypst(Star):
         except Exception as e:
             logger.error(f"[HelpTypst] 自我重载异常: {e}")
 
-    # ========== 新增：QZone Share 辅助 ==========
+    # ========== QZone Share 辅助 ==========
     def _is_aiocqhttp(self, event: AstrMessageEvent) -> bool:
         """判断是否为 aiocqhttp / OneBot QQ 平台"""
         try:
             plat = event.get_platform_name()
             if plat:
-                return "aiocqhttp" in plat.lower() or "qq" in plat.lower()
+                p = plat.lower()
+                # 放宽匹配：aiocqhttp / qq / onebot / napcat
+                if any(k in p for k in ("aiocqhttp", "qq", "onebot", "napcat", "qofficial", "qzone")):
+                    return True
         except Exception:
             pass
         # 兜底：看 unified_msg_origin
         try:
-            return event.unified_msg_origin.startswith("aiocqhttp")
+            umo = event.unified_msg_origin.lower()
+            if any(k in umo for k in ("aiocqhttp", "qq", "onebot")):
+                return True
         except Exception:
             return False
+        return False
 
     def _build_qzone_chain(self):
         """构造 QQ空间 Share 消息链"""
-        qz = self.plugin_config.qzone_share
-        if not qz.is_valid():
+        try:
+            qz = self.plugin_config.qzone_share
+        except Exception as e:
+            logger.warning(f"[HelpTypst] qzone_share 配置读取失败: {e}")
+            return []
+        if not getattr(qz, "enable", False):
+            logger.info("[HelpTypst] QZone Share 已在配置中关闭")
+            return []
+        url = getattr(qz, "url", "").strip()
+        if not url or not url.startswith("http"):
+            logger.warning(f"[HelpTypst] QZone url 无效: {url}")
             return []
         try:
-            kwargs = qz.get_share_kwargs()
-            # Share(url, title, content?, image?)
+            # 优先用配置里的 kwargs
+            if hasattr(qz, "get_share_kwargs"):
+                kwargs = qz.get_share_kwargs()
+            else:
+                kwargs = {
+                    "url": url,
+                    "title": getattr(qz, "title", "Bot使用说明") or "Bot使用说明",
+                    "content": getattr(qz, "content", "") or "点击查看",
+                }
+                img = getattr(qz, "image", "").strip()
+                if img:
+                    kwargs["image"] = img
+            logger.info(f"[HelpTypst] QZone Share -> {kwargs}")
+            # Share 必填 url + title
+            if "title" not in kwargs or not kwargs["title"]:
+                kwargs["title"] = "Bot使用说明"
             return [Share(**kwargs)]
         except Exception as e:
-            logger.warning(f"[HelpTypst] QZone Share 构造失败: {e}")
+            logger.warning(f"[HelpTypst] QZone Share 构造失败: {e}", exc_info=True)
             # 降级为纯文本链接
-            return [Plain(f"使用说明：{qz.url}")]
-    # ========== /新增 ==========
+            return [Plain(f"📖 使用说明：{url}")]
+
+    # ========== /QZone ==========
 
     async def _handle_request(
         self,
@@ -194,6 +251,7 @@ class HelpTypst(Star):
         with_qzone_share: bool = False,
     ):
         """通用请求处理逻辑"""
+        logger.info(f"[HelpTypst] _handle_request mode={mode} query={query!r} qzone={with_qzone_share} sender={event.get_sender_id()} platform={event.get_platform_name()} umo={event.unified_msg_origin}")
         wait_msg_id = None
 
         if self.plugin_config.enable_waiting_message:
@@ -240,20 +298,32 @@ class HelpTypst(Star):
             try:
                 # --- QZone Share 注入 ---
                 chain = []
-                if with_qzone_share and self.plugin_config.qzone_share.enable:
-                    if self._is_aiocqhttp(event):
-                        qz_chain = self._build_qzone_chain()
-                        if qz_chain:
-                            chain.extend(qz_chain)
-                    else:
-                        # 非 QQ 平台，回退为纯文本 URL
-                        qz = self.plugin_config.qzone_share
-                        if qz.is_valid():
-                            chain.append(Plain(f"📖 使用说明：{qz.url}\n\n"))
+                if with_qzone_share:
+                    try:
+                        qz_enable = getattr(self.plugin_config.qzone_share, "enable", False)
+                    except Exception:
+                        qz_enable = False
+                    if qz_enable:
+                        if self._is_aiocqhttp(event):
+                            qz_chain = self._build_qzone_chain()
+                            if qz_chain:
+                                chain.extend(qz_chain)
+                                logger.info(f"[HelpTypst] 注入 QZone 卡片成功: {qz_chain}")
+                            else:
+                                logger.warning("[HelpTypst] QZone 卡片为空，跳过")
+                        else:
+                            # 非 QQ 平台，回退为纯文本 URL
+                            try:
+                                qz = self.plugin_config.qzone_share
+                                if getattr(qz, "url", ""):
+                                    chain.append(Plain(f"📖 使用说明：{qz.url}\n\n"))
+                            except Exception:
+                                pass
                 # 图片
                 chain.extend([Image.fromFileSystem(p) for p in result.images])
 
                 if chain:
+                    logger.info(f"[HelpTypst] 发送 chain 长度={len(chain)} types={[type(c).__name__ for c in chain]}")
                     yield event.chain_result(chain)
                 else:
                     # 极端兜底
@@ -267,7 +337,7 @@ class HelpTypst(Star):
             if error == "empty":
                 yield event.plain_result(self.hint.msg_empty_result(mode, query))
             else:
-                yield event.plain_result(error)
+                yield event.plain_result(error or "渲染失败")
 
     async def _cleanup_task(self, files: list[Path]):
         """异步清理任务"""
@@ -289,15 +359,65 @@ class HelpTypst(Star):
             logger.warning(f"[HelpTypst] 获取唤醒词失败，使用默认值 '/': {e}")
             self.prefixes = ["/"]
 
+    # ==================== 指令注册（多别名） ====================
     @filter.command("helps")
+    @filter.command("help")
+    @filter.command("菜单")
+    @filter.command("帮助")
+    @filter.command("cd")
     async def show_menu(self, event: AstrMessageEvent, query: str = ""):
         """显示指令菜单"""
-        # helps 始终带 QZone 卡片，即便 query 非空（按用户要求 always）
+        logger.info(f"[HelpTypst] /helps 触发 sender={event.get_sender_id()} group={event.get_group_id()} query={query!r} platform={event.get_platform_name()} message={event.message_str!r}")
+        # helps 始终带 QZone 卡片，即便 query 非空
         async for r in self._handle_request(
             event, self.cmd_analyzer, "AstrBot 指令菜单", "command", query,
             with_qzone_share=True
         ):
             yield r
+
+    # 纯文本兜底监听：如果有人直接发 "helps" 没被 command 捕获（前缀问题），这里兜底
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def _fallback_helps_listener(self, event: AstrMessageEvent):
+        try:
+            txt = (event.message_str or "").strip().lower()
+            # 去掉可能的前缀
+            for p in self.prefixes + ["/", "!", "！", ".", "。", ""]:
+                if p and txt.startswith(p):
+                    txt = txt[len(p):].lstrip()
+                    break
+            if txt in ("helps", "help", "菜单", "帮助", "cd", "菜单帮助"):
+                # 避免重复触发：如果已经是 command 触发过的，会走上面的，这里做二次保险
+                # 用一个简单去重：看消息是否刚处理过（1秒内）
+                # 简化：直接放行，AstrBot 会去重
+                logger.info(f"[HelpTypst] fallback_listener 命中: {event.message_str!r} -> {txt}")
+                # 阻止事件继续往 LLM 跑
+                event.stop_event()
+                async for r in self._handle_request(
+                    event, self.cmd_analyzer, "AstrBot 指令菜单", "command", "",
+                    with_qzone_share=True
+                ):
+                    yield r
+        except Exception as e:
+            logger.debug(f"[HelpTypst] fallback_listener 异常: {e}")
+
+    # ============ QZone 单独测试指令 ============
+    @filter.command("qz")
+    @filter.command("qztest")
+    @filter.command("空间")
+    async def qzone_test(self, event: AstrMessageEvent):
+        """单独测试 QQ空间卡片"""
+        logger.info("[HelpTypst] /qztest 触发")
+        chain = self._build_qzone_chain()
+        if not chain:
+            try:
+                url = self.plugin_config.qzone_share.url
+                yield event.plain_result(f"QZone 未配置或无效。当前 url={url!r} enable={self.plugin_config.qzone_share.enable}")
+            except Exception as e:
+                yield event.plain_result(f"QZone 配置读取异常: {e}")
+            return
+        # 先发卡片，再补一条文字说明
+        chain.append(Plain("\n↑ 上面是 QQ空间 Share 卡片测试"))
+        yield event.chain_result(chain)
 
     @filter.command("events")
     async def show_events(self, event: AstrMessageEvent, query: str = ""):
