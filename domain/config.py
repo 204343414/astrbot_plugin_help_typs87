@@ -134,7 +134,7 @@ class TypstPluginConfig:
             title=str(raw_qz.get("title", "Bot使用说明")).strip(),
             content=str(raw_qz.get("content", "点击查看详细功能贴")).strip(),
             image=str(raw_qz.get("image", "")).strip(),
-            mode=str(raw_qz.get("mode", "json")).strip().lower() or "json",
+            mode=str(raw_qz.get("mode", "text")).strip().lower() or "text",
         )
         # 安全兜底
         if qzone_cfg.mode not in ("text", "share", "json", "ark", "auto"):

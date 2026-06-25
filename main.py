@@ -48,7 +48,7 @@ class HelpTypst(Star):
                 appearance=AppearanceConfig("default", {"default": ThemePreset("default", [], {})}),
                 qzone_share=QzoneShareConfig(True,
                     "https://h5.qzone.qq.com/ugc/share/?res_uin=2562925383&cellid=4723c398fea8b26971e70500",
-                    "Bot使用说明", "点击查看详细功能贴", "", "json")
+                    "Bot使用说明", "点击查看详细功能贴", "", "text")
             )
 
         raw_path = self.plugin_config.custom_font_path
@@ -172,8 +172,7 @@ class HelpTypst(Star):
 
         if mode not in ("json", "ark", "auto"):
             # 纯文本模式，直接降级
-            await self._send_text_fallback(title, content, url)
-            return True
+            return await self._send_text_fallback(event, title, content, url)
 
         # 构建精简 Ark 模板
         ctime = int(time.time())
@@ -259,20 +258,19 @@ class HelpTypst(Star):
         # 全部被拦截 → 文本降级
         if blocked_detected:
             logger.info("[QZone] Ark 卡片被 QQNT 拦截，降级为文本")
-            return await self._send_text_fallback(title, content, url)
+            return await self._send_text_fallback(event, title, content, url)
 
         return False
 
-    async def _send_text_fallback(self, title: str, content: str, url: str) -> bool:
+    async def _send_text_fallback(self, event: AstrMessageEvent, title: str, content: str, url: str) -> bool:
         """文本降级发送"""
         try:
             txt = f"📖 {title}\n{content}\n{url}" if content else f"📖 {title}\n{url}"
-            await asyncio.get_event_loop().run_in_executor(
-                None, lambda: None
-            )  # 让出控制
-            await asyncio.sleep(0)
+            await event.send(MessageChain([Plain(txt)]))
+            logger.info("[QZone] text降级成功")
             return True
-        except Exception:
+        except Exception as e:
+            logger.error(f"[QZone] text也失败: {e}", exc_info=True)
             return False
 
     # ---------- 渲染 ----------
