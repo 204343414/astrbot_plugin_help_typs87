@@ -1,6 +1,7 @@
 from .schemas import RenderNode, PluginMetadata
 from .constants import InternalCFG, DefaultCFG, RenderMode
 from .config import (
+    QzoneShareConfig,
     RenderingConfig,
     ThemePreset,
     AppearanceConfig,
@@ -17,4 +18,5 @@ __all__ = [
     "ThemePreset",
     "AppearanceConfig",
     "TypstPluginConfig",
+    "QzoneShareConfig",
 ]

@@ -4,12 +4,11 @@ from pathlib import Path
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, StarTools
-from astrbot.api.message_components import Image
+from astrbot.api.message_components import Image, Share, Plain
 
 from .domain import InternalCFG, TypstPluginConfig
 from .utils import FontManager, HelpHint, MsgRecall, TypstLayout
 from .core import CommandAnalyzer, EventAnalyzer, FilterAnalyzer, TypstRenderer
-
 
 class HelpTypst(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -25,22 +24,22 @@ class HelpTypst(Star):
         # 2. 配置加载
         self.config = config
         self.plugin_config = TypstPluginConfig.load(config)
-        
+
         # 3. 获取字体
         raw_path = self.plugin_config.custom_font_path
         if raw_path and raw_path.strip():
-            self.user_font_dir = Path(raw_path)          # 自定义字体目录
+            self.user_font_dir = Path(raw_path)  # 自定义字体目录
         else:
-            self.user_font_dir = self.data_dir / "fonts" # 缺省值
+            self.user_font_dir = self.data_dir / "fonts"  # 缺省值
 
         try:
             self.user_font_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            if not raw_path: 
+            if not raw_path:
                 logger.warning(f"[HelpTypst] 无法创建默认字体目录: {e}")
 
-        self.builtin_font_dir = self.plugin_dir / "resources" / InternalCFG.NAME_FONT_DIR # 内置
-        self.font_dirs = [self.builtin_font_dir, self.user_font_dir]                      # 汇总
+        self.builtin_font_dir = self.plugin_dir / "resources" / InternalCFG.NAME_FONT_DIR  # 内置
+        self.font_dirs = [self.builtin_font_dir, self.user_font_dir]  # 汇总
 
         # 3. 初始化组件
         self.font_manager = FontManager(self.font_dirs)
@@ -69,7 +68,7 @@ class HelpTypst(Star):
         self._init_prefixes(self.context)
         await asyncio.to_thread(self._refresh_resources)
         logger.info("[HelpTypst] 初始化完成")
-    
+
     def _refresh_resources(self):
         try:
             # 1. 扫描
@@ -106,10 +105,10 @@ class HelpTypst(Star):
                 return
 
             logger.debug(f"[HelpTypst] 清理 {len(temp_files)} 个缓存文件...")
-            
+
             for f in temp_files:
                 try:
-                    if f.exists(): # 双重检查
+                    if f.exists():  # 双重检查
                         f.unlink()
                 except OSError:
                     pass
@@ -154,6 +153,36 @@ class HelpTypst(Star):
         except Exception as e:
             logger.error(f"[HelpTypst] 自我重载异常: {e}")
 
+    # ========== 新增：QZone Share 辅助 ==========
+    def _is_aiocqhttp(self, event: AstrMessageEvent) -> bool:
+        """判断是否为 aiocqhttp / OneBot QQ 平台"""
+        try:
+            plat = event.get_platform_name()
+            if plat:
+                return "aiocqhttp" in plat.lower() or "qq" in plat.lower()
+        except Exception:
+            pass
+        # 兜底：看 unified_msg_origin
+        try:
+            return event.unified_msg_origin.startswith("aiocqhttp")
+        except Exception:
+            return False
+
+    def _build_qzone_chain(self):
+        """构造 QQ空间 Share 消息链"""
+        qz = self.plugin_config.qzone_share
+        if not qz.is_valid():
+            return []
+        try:
+            kwargs = qz.get_share_kwargs()
+            # Share(url, title, content?, image?)
+            return [Share(**kwargs)]
+        except Exception as e:
+            logger.warning(f"[HelpTypst] QZone Share 构造失败: {e}")
+            # 降级为纯文本链接
+            return [Plain(f"使用说明：{qz.url}")]
+    # ========== /新增 ==========
+
     async def _handle_request(
         self,
         event: AstrMessageEvent,
@@ -161,6 +190,8 @@ class HelpTypst(Star):
         title: str,
         mode: str,
         query: str | None,
+        *,
+        with_qzone_share: bool = False,
     ):
         """通用请求处理逻辑"""
         wait_msg_id = None
@@ -207,7 +238,26 @@ class HelpTypst(Star):
         # 4. 处理结果
         if result:
             try:
-                yield event.chain_result([Image.fromFileSystem(p) for p in result.images])
+                # --- QZone Share 注入 ---
+                chain = []
+                if with_qzone_share and self.plugin_config.qzone_share.enable:
+                    if self._is_aiocqhttp(event):
+                        qz_chain = self._build_qzone_chain()
+                        if qz_chain:
+                            chain.extend(qz_chain)
+                    else:
+                        # 非 QQ 平台，回退为纯文本 URL
+                        qz = self.plugin_config.qzone_share
+                        if qz.is_valid():
+                            chain.append(Plain(f"📖 使用说明：{qz.url}\n\n"))
+                # 图片
+                chain.extend([Image.fromFileSystem(p) for p in result.images])
+
+                if chain:
+                    yield event.chain_result(chain)
+                else:
+                    # 极端兜底
+                    yield event.chain_result([Image.fromFileSystem(p) for p in result.images])
             finally:
                 # 后台任务清理文件列表
                 if result.temp_files:
@@ -242,8 +292,10 @@ class HelpTypst(Star):
     @filter.command("helps")
     async def show_menu(self, event: AstrMessageEvent, query: str = ""):
         """显示指令菜单"""
+        # helps 始终带 QZone 卡片，即便 query 非空（按用户要求 always）
         async for r in self._handle_request(
-            event, self.cmd_analyzer, "AstrBot 指令菜单", "command", query
+            event, self.cmd_analyzer, "AstrBot 指令菜单", "command", query,
+            with_qzone_share=True
         ):
             yield r
 
@@ -251,7 +303,8 @@ class HelpTypst(Star):
     async def show_events(self, event: AstrMessageEvent, query: str = ""):
         """显示事件监听列表"""
         async for r in self._handle_request(
-            event, self.evt_analyzer, "AstrBot 事件监听", "event", query
+            event, self.evt_analyzer, "AstrBot 事件监听", "event", query,
+            with_qzone_share=False
         ):
             yield r
 
@@ -259,6 +312,7 @@ class HelpTypst(Star):
     async def show_filters(self, event: AstrMessageEvent, query: str = ""):
         """显示过滤器详情"""
         async for r in self._handle_request(
-            event, self.flt_analyzer, "AstrBot 过滤器分析", "filter", query
+            event, self.flt_analyzer, "AstrBot 过滤器分析", "filter", query,
+            with_qzone_share=False
         ):
             yield r

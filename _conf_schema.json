@@ -9,12 +9,12 @@
     "description": "黑名单插件 ID",
     "type": "list",
     "default": [
-      "astrbot", 
-      "astrbot-web-searcher", 
+      "astrbot",
+      "astrbot-web-searcher",
       "astrbot-python-interpreter",
       "session_controller",
       "builtin_commands",
-      "astrbot-reminder", 
+      "astrbot-reminder",
       "astrbot_plugin_help_typst"
     ],
     "hint": "屏蔽不想展示、导致问题的插件菜单 (使用 name 字段)"
@@ -25,6 +25,42 @@
     "default": "",
     "hint": "绝对路径。缺省值 .../data/plugin_data/astrbot_plugin_help_typst/fonts"
   },
+  "qzone_share": {
+    "description": "QQ空间说说转发卡片（helps指令）",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用QQ空间卡片",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭则 helps 不会附加空间卡片"
+      },
+      "url": {
+        "description": "说说链接 URL",
+        "type": "string",
+        "default": "https://h5.qzone.qq.com/ugc/share/?sharetag=e94fd924-7097-11f1-9211-525400694753&loginfrom=4&jumptoqzone=1&feed_action_domain_type=1&banner_type=0&subtype=&ciphertext=&blog_photo=&g=84&res_uin=2562925383&cellid=4723c398fea8b26971e70500&subid=&bp1=&bp2=&bp7=&appid=311&g_f=2000000103",
+        "hint": "填入你要转发的QQ空间说说完整链接"
+      },
+      "title": {
+        "description": "卡片标题",
+        "type": "string",
+        "default": "Bot使用说明",
+        "hint": "Share 必须有 title，留空自动用 'Bot使用说明'"
+      },
+      "content": {
+        "description": "卡片描述",
+        "type": "string",
+        "default": "点击查看详细功能贴 / 使用事项",
+        "hint": "可选，留空不填也行"
+      },
+      "image": {
+        "description": "卡片缩略图 URL",
+        "type": "string",
+        "default": "",
+        "hint": "可选，https 图片链接，留空由QQ自动抓取"
+      }
+    }
+  },
   "rendering": {
     "description": "渲染引擎设置",
     "type": "object",
@@ -32,7 +68,7 @@
       "timeout_analysis": {
         "description": "数据分析超时 (秒)",
         "type": "float",
-		"slider": {
+        "slider": {
           "min": 3,
           "max": 30,
           "step": 1
@@ -43,7 +79,7 @@
       "timeout_compile": {
         "description": "Typst 编译超时 (秒)",
         "type": "float",
-		"slider": {
+        "slider": {
           "min": 3,
           "max": 60,
           "step": 1
@@ -51,10 +87,10 @@
         "default": 30.0,
         "hint": "调用 Typst 编译图片的超时时间，根据其他项目调整"
       },
-	  "max_concurrent_tasks": {
+      "max_concurrent_tasks": {
         "description": "最大并发编译数",
         "type": "int",
-		"slider": {
+        "slider": {
           "min": 1,
           "max": 10,
           "step": 1
@@ -62,10 +98,10 @@
         "default": 2,
         "hint": "同时进行的 Typst 编译任务数量限制，根据 CPU 调整"
       },
-	  "ppi": {
+      "ppi": {
         "description": "图片清晰度 (PPI)",
         "type": "float",
-		"slider": {
+        "slider": {
           "min": 64,
           "max": 256,
           "step": 1
@@ -76,7 +112,7 @@
       "giant_threshold": {
         "description": "巨型块阈值 (pt)",
         "type": "int",
-		"slider": {
+        "slider": {
           "min": 100,
           "max": 3000,
           "step": 100
@@ -84,10 +120,10 @@
         "default": 1500,
         "hint": "超过此高度的插件将独占一行显示 (仅 Event/Filter 模式有效)"
       },
-	  "split_height": {
+      "split_height": {
         "description": "长图切分高度 (px)",
         "type": "int",
-		"slider": {
+        "slider": {
           "min": 1000,
           "max": 16000,
           "step": 1000
@@ -136,9 +172,7 @@
                 "default": ["Sarasa Gothic SC", "Noto Color Emoji"],
                 "options": ["Sarasa Gothic SC", "Noto Color Emoji"]
               },
-              
               "header_001": { "description": "🎨 基础背景与文字", "type": "string", "default": "---", "read_only": true },
-              
               "page_fill": {
                 "description": "页面背景色",
                 "type": "string",
@@ -149,9 +183,7 @@
                 "type": "string",
                 "default": "#1a1a1a"
               },
-
               "header_002": { "description": "🧩 插件卡片样式", "type": "string", "default": "---", "read_only": true },
-
               "c_plugin_name": {
                 "description": "插件名称颜色",
                 "type": "string",
@@ -162,9 +194,7 @@
                 "type": "string",
                 "default": "#546e7a"
               },
-
               "header_003": { "description": "📂 指令组与列表", "type": "string", "default": "---", "read_only": true },
-
               "c_group_title": {
                 "description": "分组标题颜色",
                 "type": "string",
@@ -200,9 +230,7 @@
                 "type": "string",
                 "default": "#e0e0e0"
               },
-
               "header_004": { "description": "🏷️ 标签与胶囊", "type": "string", "default": "---", "read_only": true },
-
               "c_ver_bg": { "description": "版本号背景", "type": "string", "default": "#e3f2fd" },
               "c_ver_text": { "description": "版本号文字", "type": "string", "default": "#1565c0" },
               "c_prio_bg": { "description": "优先级背景", "type": "string", "default": "#e8eaf6" },
@@ -210,9 +238,7 @@
               "c_tag_admin": { "description": "管理员图标颜色", "type": "string", "default": "#c62828" },
               "c_tag_event": { "description": "事件图标颜色", "type": "string", "default": "#f57c00" },
               "c_tag_mcp": { "description": "MCP图标颜色", "type": "string", "default": "#00695c" },
-              
               "header_005": { "description": "🔍 其他", "type": "string", "default": "---", "read_only": true },
-
               "c_highlight_bg": { "description": "搜索高亮背景", "type": "string", "default": "#ffeb3b" },
               "c_highlight_text": { "description": "搜索高亮文字", "type": "string", "default": "#000000" }
             }
